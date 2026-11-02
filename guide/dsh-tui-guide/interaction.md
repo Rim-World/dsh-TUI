@@ -807,7 +807,7 @@ Claude 后端的审批来自 CLI：CLI 给出建议时多一个「始终允许�
 - `/recap`：最近活动摘要 + 建议标题一键应用。
 - 设置 `recapOnOpen` 开启时打开会话自动出分隔线 + `回顾：` 摘要行，发送新消息后消失，默认开。
 - `/workspace resume|rename|open`。
-- `/clear`、`/compact`、`/export`、`/btw`。
+- `/clear`（只清视图：不动会话日志与上下文）、`/compact`、`/export`、`/btw`。
 - `/trace`：轨迹场景，亦可 `Ctrl+T`。
 - `/rewind`：时间回溯，同空输入双击 `Esc`。
 

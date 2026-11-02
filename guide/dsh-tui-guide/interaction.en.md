@@ -818,7 +818,7 @@ The command menu merges local commands with the DSH command registry. Type `/` t
   auto-summary on session open, on by default — a divider + `Recap:` line appears at the
   bottom of the transcript when resuming, and bows out once you send a new message.
 - `/workspace resume|rename|open`.
-- `/clear`, `/compact`, `/export`, `/btw`.
+- `/clear` (view only: the session log and context are untouched), `/compact`, `/export`, `/btw`.
 - `/trace` — trajectory scene, also `Ctrl+T`.
 - `/rewind` — time travel, same as double-`Esc` on an empty input.
 - `/tree` — session family tree: every fork branch stitched together; hover previews a node,

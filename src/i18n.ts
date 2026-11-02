@@ -202,7 +202,7 @@ const dict = {
     en: 'Please relay the following user message verbatim to subagent "{{name}}" (target id {{id}}): deliver it with the SendMessage tool, do not rewrite its content and do not answer on its behalf. Briefly report the outcome afterwards.\n\n{{text}}',
   },
   // ── backends: capability-gated actions and commands ─────────────────
-  'session-cleared': { zh: '会话已清屏', en: 'Session cleared' },
+  'session-cleared': { zh: '已清屏（会话日志与上下文保留）', en: 'View cleared (session log and context kept)' },
   'conversation-reset': { zh: '对话已重置，之前的上下文已清空', en: 'The conversation was reset; the earlier context is gone' },
   'conversation-reset-clear': { zh: '对话已清空，接下来从新的上下文开始', en: 'Conversation cleared; continuing with a fresh context' },
   'conversation-reset-plan': { zh: '退出计划模式时清空了上下文，接下来带着计划从新的上下文开始', en: 'Context cleared on leaving plan mode; continuing from a fresh context with the plan' },
@@ -2342,7 +2342,7 @@ const dict = {
   // so `/lang` switches apply on the next repaint.
   // Conversation
   'cmd-desc-new': { zh: '新开会话' },
-  'cmd-desc-clear': { zh: '清空当前会话' },
+  'cmd-desc-clear': { zh: '只清屏：会话日志与上下文保留' },
   'cmd-desc-compact': { zh: '压缩会话历史' },
   // 能力缺失时的替代描述（`annotateCommandCapabilities` 按需改指到这里）：
   // Help 与 `/` 补全都说清「为什么不可用」，而不是按下去才报错。en 必须写全，

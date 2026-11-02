@@ -148,8 +148,8 @@ clickCell(s.stdin, col1, menuRowIdx + 1)
 await sleep(500)
 
 lines = screenLines(term)
-// 菜单行文案是本地化的（清空当前会话）——菜单关闭即该行消失
-const menuGone = !lines.some(l => l.includes('清空当前会话') || l.includes('Clear the conversation'))
+// 菜单行文案是本地化的（只清屏：会话日志与上下文保留）——菜单关闭即该行消失
+const menuGone = !lines.some(l => l.includes('只清屏') || l.includes('Clear the view only'))
 check('点击后菜单关闭（命令被执行、输入清空）', menuGone)
 check('channel.clear 被调用（/clear 真的跑了）', clearCalls > 0, `clearCalls=${clearCalls}`)
 

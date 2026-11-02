@@ -366,13 +366,15 @@ The command menu = built-in commands (aliases included) + DSH registry commands 
 | `/rename` | `<新名称>` | rename the current session (no arg shows the current title and usage) |
 | `/recap` | none | recent-activity summary (one line) + suggested title; press `a` or click to apply the title. With `dsh-tui.recapOnOpen` (default on), opening/resuming a session auto-shows a divider + `回顾：` summary line at the bottom; hover to view actions, click to expand, gone after the next message |
 | `/workspace` | `resume` / `rename <名称>` / `open <路径或URI>` | manage workspaces; `open` accepts an absolute path, file URI, or plugin scheme |
-| `/clear` | none | clear the current session view (reset expand/selection state) |
+| `/clear` | none | clear the current session view: clears the screen and resets expand/selection state; the session event log is kept and the model context is not reset (use `/new` for a fresh context, `/compact` to condense history) |
 | `/compact` | none | compact session history (prompts when nothing to compact) |
 | `/export` | none | export the session as Markdown to the project the session opened in (an Agent `working_directory` cd does not move it) |
 | `/btw` | `<问题>` | side question: single turn, no tools, doesn't interrupt the main turn, not written to history |
 | `/trace` | none | open the trace scene (same as `Ctrl+T`) |
 | `/rewind` | none | rewind selector (same as double-press Esc on empty input); **a running turn is cancelled first** |
 | `/exit` (alias `/quit` `/q`) | none | exit dsh-tui |
+
+> `/clear` clears the display only: the session event log is kept (`/export` and `/resume` still see the full record) and the model context is not reset. Use `/new` for a fresh context.
 
 ### 3.2 Status and diagnostics
 
@@ -457,7 +459,7 @@ dsh-TUI ships no generic skills; `/skills` browses skills DSH discovers, and a d
 | Rename | `/rename <标题>` | rename immediately and persist (writes a session/title event, readable back in the session manager) |
 | Compact | `/compact` | trigger DSH compaction manually; **rejected mid-turn**; unavailable under minimal preset; the compaction point renders as a Divider summary row |
 | Export | `/export` | export Markdown from the full session log (thinking and tool-call sections), file `dsh-tui-export-<时间戳>.md` in the session's opening project cwd (an Agent `cd` does not move it) |
-| Clear | `/clear` | clears the view only, never the session log |
+| Clear | `/clear` | clears the view only — never the session log, and never resets the model context (use `/new` for that) |
 | Stop | session manager `Ctrl+X` | stop the **background** session under the cursor; the session the current terminal is using can't be stopped (exit the whole TUI with `/exit` or double-press `Ctrl+C`) |
 | Exit | `/exit` (or `/quit` `/q`) | double-press `Ctrl+C` or `Ctrl+D` also exits when idle; mid-work, press `Ctrl+C`/`Ctrl+D` again to force quit when the interrupt won't settle |
 

@@ -64,7 +64,7 @@ function isArgumentCompletionToken(value: string): boolean {
 export const LOCAL_COMMANDS: LocalCommand[] = [
   // Conversation
   { name: 'new', description: 'Start a new conversation' },
-  { name: 'clear', description: 'Clear the conversation' },
+  { name: 'clear', description: 'Clear the view only (session log and context kept)' },
   { name: 'compact', description: 'Summarize earlier turns to free context space' },
   { name: 'resume', description: 'Continue a saved session' },
   { name: 'rename', description: 'Rename the current session' },
