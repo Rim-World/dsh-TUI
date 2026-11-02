@@ -337,12 +337,12 @@ function makeOptions(overrides: Partial<VisibleRowsOptions> = {}): VisibleRowsOp
     exitOnCtrlC: false,
     patchConsole: false,
   })
-  await sleep(1200)
+  await sleep(1200) // 固定窗:pacing 等 Ink 首帧提交落地
   check('组件渲染：首帧输出非空', fake.stdout.frames.length > 0, String(fake.stdout.frames.length))
 
   resetVisibleWindowProbe()
   rendered.rerender(tree(base))
-  await sleep(500)
+  await sleep(500) // 固定窗:pacing 等 rerender 提交落地
   const sameRows = readVisibleWindowProbe()
   check(
     '组件渲染：相同 rows 重渲染命中缓存（零重建）',
@@ -354,7 +354,7 @@ function makeOptions(overrides: Partial<VisibleRowsOptions> = {}): VisibleRowsOp
   const outside = base.slice()
   outside[4] = makeRow(5, { text: 'OUTSIDE-UPDATED' })
   rendered.rerender(tree(outside))
-  await sleep(500)
+  await sleep(500) // 固定窗:pacing 等 rerender 提交落地
   const outsideRen = readVisibleWindowProbe()
   check(
     '组件渲染：窗口外更新不重建缓存（只扫窗口）',
@@ -366,7 +366,7 @@ function makeOptions(overrides: Partial<VisibleRowsOptions> = {}): VisibleRowsOp
   const inside = outside.slice()
   inside[count - 1] = makeRow(count, { streaming: true, text: 'tail-updated' })
   rendered.rerender(tree(inside))
-  await sleep(500)
+  await sleep(500) // 固定窗:pacing 等 rerender 提交落地
   const insideRen = readVisibleWindowProbe()
   check(
     '组件渲染：窗口内更新重建缓存且访问数为窗口级',
@@ -375,7 +375,7 @@ function makeOptions(overrides: Partial<VisibleRowsOptions> = {}): VisibleRowsOp
   )
 
   rendered.unmount()
-  await sleep(100)
+  await sleep(100) // 固定窗:pacing 等卸载收尾
   check('组件渲染：卸载后仍无异常', true)
 }
 

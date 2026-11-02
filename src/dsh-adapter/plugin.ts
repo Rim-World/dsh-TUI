@@ -3,8 +3,6 @@ import { join } from 'node:path'
 import React from 'react'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
-import UserQuestionService from '@deepseek-ai/dsh-user-questions'
-import * as toolAskUser from '@deepseek-ai/dsh-tool-ask-user'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import Schema from '@deepseek-ai/schemastery'
@@ -44,7 +42,6 @@ import { prepareQuestionAnswerer } from './questions-answerer.js'
 import { adapterRuntimeFor } from '../adapter/kernel/runtime-context.js'
 import { ApprovalStore, bindApprovalStore } from './approvals.js'
 import { PermissionStore } from '../channel/permissions.js'
-import { registerPromptDebug } from './promptDebug.js'
 import { readActivityFrames } from '../activityPrefs.js'
 import { commitFullscreenFactoryMigration, planFullscreenFactoryMigration, readAppliedMigrations } from '../migrationPrefs.js'
 import { readModelPref } from '../modelPrefs.js'
@@ -85,7 +82,6 @@ import { startSessionMountHeartbeat } from './session-mount-heartbeat.js'
 import { reserveMount, reserveNewSession } from '../sessionMounts.js'
 import { getHostDialogStore, type TuiDialogRuntime } from './dialogs.js'
 import { getHostStatusStore, type TuiStatusRuntime } from './status.js'
-import { attachSessionListMetadata } from './session-list-metadata.js'
 import { createActivityStore } from './activity-store.js'
 import { createContextOccupancyStore } from './context-occupancy.js'
 import { createTeamRosterStore } from './team-roster.js'
@@ -379,6 +375,20 @@ async function showWindowsToast(input: WindowsToastInput): Promise<WindowsToastR
 
 export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, configOwner: Context = ctx, runtimeOptions: RuntimeApplyOptions = {}): Promise<void> {
   const config = configValues<Config>(runtimeConfig)
+  // WP6 启动关键路径实验（DSH_TUI_LAZY_STARTUP）：下面四个模块只在非入口内核
+  // （mountDshQuestionSeams / installPresets 之外）或首帧之后才被使用。开关关闭时
+  // 在这里 eager 加载，默认启动图与时序不变；打开时推迟到调用点动态 import。
+  // 失败语义：eager 路径失败与原先静态 import 失败一致（启动失败）；flag 打开的
+  // 动态路径失败时，延迟注册按既有「服务不可用」降级，不阻断启动（见调用点注释）。
+  const lazyStartup = isEnvTruthy(process.env.DSH_TUI_LAZY_STARTUP)
+  if (!lazyStartup) {
+    await Promise.all([
+      import('@deepseek-ai/dsh-user-questions'),
+      import('@deepseek-ai/dsh-tool-ask-user'),
+      import('./promptDebug.js'),
+      import('./session-list-metadata.js'),
+    ])
+  }
   const taskNotifier = createTerminalNotifier(process.stdout)
   const { settings: notificationSettings, configure: configureTaskNotifications } = createTaskNotificationSettings(taskNotifier, {
     condition: config.taskNotifications ?? 'unfocused',
@@ -494,7 +504,13 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   const tuiSettingsNs = resolveSettingsNamespace(configOwner, Config) as SettingsNamespace
 
   // Register before agent creation so its first checkpoint includes web list metadata.
-  attachSessionListMetadata(ctx)
+  // WP6 实验：默认 DSH 入口路径的 agent 在 profile 组合完成后（首帧后）才创建，
+  // 因此注册可以移到首帧后，从首帧前模块图里移出 zod；其他内核与开关关闭时保持原时序。
+  const deferSessionListMetadata = lazyStartup && runtimeOptions.entrySlot?.dsh === true
+  if (!deferSessionListMetadata) {
+    const { attachSessionListMetadata } = await import('./session-list-metadata.js')
+    attachSessionListMetadata(ctx)
+  }
   // The TUI's own settings layer (~/.dsh-tui/settings.json): the same
   // document on every kernel and entry. Other namespaces still go
   // to the host's settings service (absent in the standalone entry).
@@ -600,10 +616,17 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // inject proxy. The in-process DSH kernel mounts these from its dsh-tui row
   // once DSH has composed: mounting them on the entry's root first would
   // take the `userQuestions` seat the profile's own row registers.
-  const mountDshQuestionSeams = (dshCtx: Context): {
+  const mountDshQuestionSeams = async (dshCtx: Context): Promise<{
     readonly registration: ReturnType<typeof prepareQuestionAnswerer>
     readonly notice: string | undefined
-  } => {
+  }> => {
+    // WP6 实验：这三个模块只在这里使用（非入口内核路径），按需加载；
+    // 开关关闭时已在 apply 入口 eager 加载，这两次 import 命中缓存。
+    const [{ default: UserQuestionService }, toolAskUser, { registerPromptDebug }] = await Promise.all([
+      import('@deepseek-ai/dsh-user-questions'),
+      import('@deepseek-ai/dsh-tool-ask-user'),
+      import('./promptDebug.js'),
+    ])
     const userQuestions = dshCtx.get('userQuestions') ?? new UserQuestionService(dshCtx)
     dshCtx.plugin(toolAskUser)
     // The host-level tool mount above is intentional for the TUI and for user
@@ -645,7 +668,16 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     }
     return { registration, notice }
   }
-  const questionSeams = dshInEntry ? undefined : mountDshQuestionSeams(ctx)
+  // WP6 实验：动态 import 失败（仅开关打开时可能发生在这里）降级为不挂 DSH 问卷接缝，
+  // 与「宿主没有 userQuestions 服务」的既有降级同向；原路径（静态 import 失败）会让启动失败。
+  let questionSeams: Awaited<ReturnType<typeof mountDshQuestionSeams>> | undefined
+  if (!dshInEntry) {
+    try {
+      questionSeams = await mountDshQuestionSeams(ctx)
+    } catch (error) {
+      logForDebugging(`dsh-tui: DSH question seams unavailable (${error instanceof Error ? error.message : String(error)})`)
+    }
+  }
   let questionSeatNotice: string | undefined = questionSeams?.notice
 
   // Child-process stderr guard (issue #17): MCP servers spawned with an
@@ -2806,6 +2838,17 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     ...(awaitsFirstFrame ? { onFrame: () => { frameFlushed() } } : {}),
   })
   markBoot('render-done')
+  // WP6 实验：延后注册的 sessionListMetadata（见 apply 开头的 deferSessionListMetadata）。
+  // 首帧已刷出；DSH 会话在 profile 组合完成后才由 attachDsh 创建，注册仍早于它的首个 checkpoint。
+  // 失败只降级（web 列表元数据缺省按非空白处理），不阻断启动；原路径会启动失败。
+  if (deferSessionListMetadata) {
+    void import('./session-list-metadata.js').then(
+      module => { module.attachSessionListMetadata(ctx) },
+      error => {
+        logForDebugging(`dsh-tui: sessionListMetadata registration failed (${error instanceof Error ? error.message : String(error)})`)
+      },
+    )
+  }
   const isRecompose = lastBootedFullscreen !== undefined
   lastBootedFullscreen = bootedFullscreen
   lastBootedTerminalImages = bootedTerminalImages
@@ -2953,9 +2996,16 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       ready: () => channel.ready,
       mountSeams: async (dshCtx) => {
         await installPresets(dshCtx)
-        const seams = mountDshQuestionSeams(dshCtx)
-        if (seams.notice !== undefined) notifyChannel(seams.notice, { color: 'error' })
-        if (seams.registration.kind === 'waterfall') seams.registration.register(channel)
+        // WP6 实验：接缝模块按需加载，失败只降级（同「宿主无 userQuestions 服务」），
+        // 不让一个可选接缝的模块加载失败阻断首次组合后的屏幕。
+        const seams = await mountDshQuestionSeams(dshCtx).catch((error: unknown) => {
+          logForDebugging(`dsh-tui: DSH question seams unavailable (${error instanceof Error ? error.message : String(error)})`)
+          return undefined
+        })
+        if (seams !== undefined) {
+          if (seams.notice !== undefined) notifyChannel(seams.notice, { color: 'error' })
+          if (seams.registration.kind === 'waterfall') seams.registration.register(channel)
+        }
         mountDshApprovals(dshCtx)
         refreshHostServices()
       },
