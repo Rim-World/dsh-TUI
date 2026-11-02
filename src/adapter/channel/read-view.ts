@@ -77,6 +77,11 @@ export function createChannelReadView(check: (mutation: boolean) => void) {
       (prior.value as unknown[]).length === value.length &&
       prior.dirtyRevision === dirtyRevision
     ) return prior.value as T
+    // Marked arrays (for example the tps sample ring) are rebuilt only when
+    // their owner calls `markChannelReadDirty`: a version bump alone must not
+    // recopy hundreds of untouched samples. Unmarked arrays keep revision 0
+    // and stay on the version path below.
+    if (prior !== undefined && Array.isArray(value) && dirtyRevision > 0 && prior.dirtyRevision === dirtyRevision) return prior.value as T
     if (prior !== undefined && !isTranscriptRow(value) && prior.version === version) return prior.value as T
     if (value instanceof Map) {
       const entries = new Map([...value].map(([k, v]) => [copy(k), copy(v)]))

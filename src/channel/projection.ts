@@ -1049,6 +1049,7 @@ export function createChannelProjection(state: ProjectionState, deps: ChannelPro
         sample = { tps: turnTps, at: event.time }
         state.tpsSamples.push(sample)
         if (state.tpsSamples.length > 500) state.tpsSamples.shift()
+        markChannelReadDirty(state.tpsSamples)
       } else {
         // Do not leave a chars/4 live estimate behind when no completed
         // decode sample exists for this turn.
@@ -1295,6 +1296,7 @@ export function createChannelProjection(state: ProjectionState, deps: ChannelPro
               tpsClosedTurn.sample = { tps: state.tps, at: tpsClosedTurn.endAt }
               state.tpsSamples.push(tpsClosedTurn.sample)
               if (state.tpsSamples.length > 500) state.tpsSamples.shift()
+              markChannelReadDirty(state.tpsSamples)
             } else {
               tpsClosedTurn.sample.tps = state.tps
             }

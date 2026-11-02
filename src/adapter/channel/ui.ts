@@ -76,6 +76,20 @@ export function createChannelUi(channel: ChannelUi, mode: AdapterMode, lease: Ch
     return agentViewProjected
   }
   const query = <T>(value: T): T => createChannelReadView(mutation => check(mutation ? 'mutate' : 'read-only'))(value, 0)
+  // Control wrappers (subagentControl / jobControl) and the plugin-scene
+  // projection used to be rebuilt on every property read, so two reads in the
+  // same version returned different objects and consumers could not memo on
+  // identity. Cache per underlying object and channel.version; the wrapper
+  // still calls check() on every method invocation, so a lease that ends
+  // between reads still throws.
+  const wrappedControls = new WeakMap<object, { version: number; value: unknown }>()
+  const memoControl = <T>(control: object, build: () => T): T => {
+    const cached = wrappedControls.get(control)
+    if (cached !== undefined && cached.version === channel.version) return cached.value as T
+    const value = build()
+    wrappedControls.set(control, { version: channel.version, value })
+    return value
+  }
   const settle = <T>(value: T): T => {
     if (value instanceof Promise) return value.then(result => { check('read-only'); return query(result) }) as T
     return query(value)
@@ -100,28 +114,32 @@ export function createChannelUi(channel: ChannelUi, mode: AdapterMode, lease: Ch
         check('read-only')
         if (key === 'subagentControl') {
           const control = channel.subagentControl
-          const projected = methods(control, { interrupt: 'mutate' } as Readonly<Record<keyof typeof control, HostEffectClass>>)
-          const history = control.history
-          // The transcript read is an optional capability (Claude only): the
-          // method's absence is the signal the detail scene reads.
-          if (history === undefined) return projected
-          return Object.freeze({ ...projected, history: (id: string, window?: import('../../agent/capabilities.js').SubagentTranscriptWindow) => { check('read-only'); return history.call(control, id, window) } })
+          return memoControl(control, () => {
+            const projected = methods(control, { interrupt: 'mutate' } as Readonly<Record<keyof typeof control, HostEffectClass>>)
+            const history = control.history
+            // The transcript read is an optional capability (Claude only): the
+            // method's absence is the signal the detail scene reads.
+            if (history === undefined) return projected
+            return Object.freeze({ ...projected, history: (id: string, window?: import('../../agent/capabilities.js').SubagentTranscriptWindow) => { check('read-only'); return history.call(control, id, window) } })
+          })
         }
         if (key === 'jobControl') {
           const control = channel.jobControl as ChannelUi['jobControl'] | undefined
           if (control === undefined) return undefined
-          const projected = methods(control, { kill: 'mutate' } as Readonly<Record<keyof typeof control, HostEffectClass>>)
-          const watch = control.watchOutput
-          if (watch === undefined) return projected
-          // A renderer observation of an on-screen card (like `subscribe`):
-          // the lease owns the unwatch, so a card unmounting after the
-          // channel's release is a no-op.
-          return Object.freeze({ ...projected, watchOutput: (id: string) => { check('read-only'); return lease.own(watch.call(control, id)) } })
+          return memoControl(control, () => {
+            const projected = methods(control, { kill: 'mutate' } as Readonly<Record<keyof typeof control, HostEffectClass>>)
+            const watch = control.watchOutput
+            if (watch === undefined) return projected
+            // A renderer observation of an on-screen card (like `subscribe`):
+            // the lease owns the unwatch, so a card unmounting after the
+            // channel's release is a no-op.
+            return Object.freeze({ ...projected, watchOutput: (id: string) => { check('read-only'); return lease.own(watch.call(control, id)) } })
+          })
         }
         if (key === 'autoRecapOnOpen' && (mode === 'passive-shadow' || mode === 'replay-shadow')) return false
         if (key === 'pluginScene') {
           const scene = channel.pluginScene
-          return scene === undefined ? undefined : project({ id: scene.id, title: scene.title })
+          return scene === undefined ? undefined : memoControl(scene, () => project({ id: scene.id, title: scene.title }))
         }
         return project(channel[key])
       },
