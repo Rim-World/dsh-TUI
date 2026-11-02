@@ -1,5 +1,7 @@
 /** Detached in-process read projections. Executable leaves are guarded, not serialized. */
 
+import { perfCount } from '../../utils/perfCounters.js'
+
 /**
  * Rows are mutable while the channel reduces live events, but renderer-facing
  * snapshots are not. The reducer marks a row when it changes so a later read
@@ -15,6 +17,7 @@ const projectedValues = new WeakMap<object, boolean>()
 let nextDirtyRevision = 1
 
 export function markChannelReadDirty(value: object): void {
+  perfCount('channel.markDirty')
   dirtyRevisions.set(value, nextDirtyRevision++)
 }
 
@@ -40,10 +43,12 @@ export function createChannelReadView(check: (mutation: boolean) => void) {
         return copy(output)
       }) as T
       projectedValues.set(result as object, true)
+      perfCount('readview.copies')
       copies.set(value, { value: result as object, version, dirtyRevision: 0 })
       return result
     }
     if (value === null || typeof value !== 'object') return value
+    perfCount('readview.visits')
     // Structural containers are detached below. Every other object is a leaf
     // with its own identity and semantics — binary buffers, Date, Error, class
     // instances, promises — and copying one key by key silently hollows it
@@ -92,6 +97,7 @@ export function createChannelReadView(check: (mutation: boolean) => void) {
         forEach(callback, thisArg) { entries.forEach((v, k) => callback.call(thisArg, v, k, view)) },
       })
       const executable = [...entries].some(([key, entry]) => projectedValues.get(key) === true || projectedValues.get(entry) === true)
+      perfCount('readview.copies')
       projectedValues.set(view, executable)
       copies.set(value, { value: view, version, dirtyRevision })
       return view as T
@@ -105,6 +111,7 @@ export function createChannelReadView(check: (mutation: boolean) => void) {
         forEach(callback, thisArg) { entries.forEach(v => callback.call(thisArg, v, v, view)) },
       })
       const executable = [...entries].some(entry => projectedValues.get(entry) === true)
+      perfCount('readview.copies')
       projectedValues.set(view, executable)
       copies.set(value, { value: view, version, dirtyRevision })
       return view as T
@@ -120,12 +127,14 @@ export function createChannelReadView(check: (mutation: boolean) => void) {
       for (const [name, child] of Object.entries(value)) result[name] = copy(child, name, value)
     }
     const frozen = Object.freeze(result)
+    perfCount('readview.copies')
     const executable = Object.values(result).some(child => child !== null && (typeof child === 'object' || typeof child === 'function') && projectedValues.get(child as object) === true)
     projectedValues.set(frozen, executable)
     copies.set(value, { value: frozen, version, dirtyRevision })
     return frozen as T
   }
   return <T>(value: T, nextVersion: number): T => {
+    if (nextVersion !== version) perfCount('channel.versionBumps')
     version = nextVersion
     return copy(value)
   }

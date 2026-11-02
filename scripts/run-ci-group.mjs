@@ -1568,6 +1568,14 @@ const GROUPS = {
 // scrollback 零增量、动效帧只含 SGR。
     ["verify-trace-scene", ['node', '--import', 'tsx/esm', 'scripts/verify-trace-scene.tsx']],
   ],
+  // 性能优化回归（WP9 接入）：语义断言 + 成本/身份断言，阈值宽松、以语义为主。
+  // 本地用法：node scripts/run-ci-group.mjs perf-opt --jobs 1
+  'perf-opt': [
+    ['verify-perf-filelink-linear', ['node', '--import', 'tsx/esm', 'scripts/verify-perf-filelink-linear.ts']],
+    ['verify-perf-agent-view-identity', ['node', '--import', 'tsx/esm', 'scripts/verify-perf-agent-view-identity.ts']],
+    ['verify-perf-read-view', ['node', '--import', 'tsx/esm', 'scripts/verify-perf-read-view.ts']],
+    ['verify-perf-rows-cache', ['node', '--import', 'tsx/esm', 'scripts/verify-perf-rows-cache.ts']],
+  ],
 }
 
 const groupName = process.argv[2]
