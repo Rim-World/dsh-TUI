@@ -61,6 +61,20 @@ export function createChannelUi(channel: ChannelUi, mode: AdapterMode, lease: Ch
   }
   const read = createChannelReadView(mutation => check(mutation ? 'mutate' : 'read-only'))
   const project = <T>(value: T): T => read(value, channel.version)
+  // The agent-view roster feeds Chat's useSyncExternalStore snapshot. Its
+  // source array is stable until the projection notifies (rowsCache in
+  // dsh-adapter/channel/agent-view-projection.ts): an unrelated
+  // channel.version bump (streaming text, status) must not mint a new
+  // snapshot identity, or React re-runs its consistency check and re-renders
+  // the chat root on every chunk. Retain the projection for the same source.
+  let agentViewSource: readonly unknown[] | undefined
+  let agentViewProjected: readonly unknown[] | undefined
+  const projectAgentViewRows = (source: readonly unknown[]): readonly unknown[] => {
+    if (source === agentViewSource) return agentViewProjected!
+    agentViewSource = source
+    agentViewProjected = project(source)
+    return agentViewProjected
+  }
   const query = <T>(value: T): T => createChannelReadView(mutation => check(mutation ? 'mutate' : 'read-only'))(value, 0)
   const settle = <T>(value: T): T => {
     if (value instanceof Promise) return value.then(result => { check('read-only'); return query(result) }) as T
@@ -191,7 +205,8 @@ export function createChannelUi(channel: ChannelUi, mode: AdapterMode, lease: Ch
       // hand it back as-is; the lease/shadow `check()` above still gates the
       // call itself (same contract as before the Channel UI split).
       if (key === 'traceEvents' || key === 'trajectoryLaneEvents') return result
-      if (key === 'agentViewRows' || key === 'settingsSections') return project(result)
+      if (key === 'agentViewRows') return projectAgentViewRows(result as readonly unknown[])
+      if (key === 'settingsSections') return project(result)
       return settle(result)
     }
   }

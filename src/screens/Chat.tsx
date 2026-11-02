@@ -193,6 +193,11 @@ import {
   type WorkspaceFlowInput,
 } from './chatOverlay.js'
 
+/** Stable empty roster for channel stubs that predate agent view. Module
+ *  scope so the `useSyncExternalStore` snapshot never changes identity
+ *  between renders of a stub-fed harness. */
+const EMPTY_AGENT_VIEW_ROWS: readonly never[] = []
+
 /** Strip the focus/global-input surface even from untyped plugins. Local
  * click, hover, and captured drag stay inside the view and are kept. */
 function StatusViewBox({
@@ -1293,12 +1298,19 @@ export function Chat({
   /** Live agent-view rows: the prompt footer's "← N agents" hint reads the
    *  needs-input count from here (cached snapshot in the channel). The
    *  `?.()` fallbacks keep pre-agent-view test stubs (channel facades in
-   *  scripts/*) rendering — the real channel always provides the seams. */
-  const EMPTY_AGENT_VIEW_ROWS: readonly never[] = []
-  const agentViewRows = React.useSyncExternalStore(
-    listener => channel.subscribeAgentView?.(listener) ?? (() => {}),
-    () => channel.agentViewRows?.() ?? EMPTY_AGENT_VIEW_ROWS,
+   *  scripts/*) rendering — the real channel always provides the seams.
+   *  Both callbacks are stable references on purpose: React re-checks the
+   *  snapshot whenever `getSnapshot` changes, and the channel's roster is
+   *  deliberately identity-stable across unrelated version bumps. */
+  const subscribeAgentViewRows = React.useCallback(
+    (listener: () => void) => channel.subscribeAgentView?.(listener) ?? (() => {}),
+    [channel],
   )
+  const getAgentViewRows = React.useCallback(
+    () => channel.agentViewRows?.() ?? EMPTY_AGENT_VIEW_ROWS,
+    [channel],
+  )
+  const agentViewRows = React.useSyncExternalStore(subscribeAgentViewRows, getAgentViewRows)
   const backgroundAgentsNeedingInput = agentViewRows.filter(
     row => row.status === 'needs-input' && !row.current,
   ).length
