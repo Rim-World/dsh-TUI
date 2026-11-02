@@ -55,7 +55,7 @@ import { primaryComboString } from '../utils/keymap.js'
  *  on open (measured, 800-row inline session). 120 rows ≈ 4-5 screens of
  *  paint (<1s) with the rest behind the show-previous divider. The transcript
  *  is a viewport, not a printout; load-earlier restores older rows. */
-const RENDERED_ROW_CAP = 120
+export const RENDERED_ROW_CAP = 120
 
 /** Threshold of the `auto` jobGroupFold policy: a run of this many (or
  *  more) FULLY SETTLED jobs folds into its own summary line. Two jobs are
@@ -217,6 +217,334 @@ function jobStatusCode(status: string): number {
     case 'failed': return 4
     case 'killed': return 5
     default: return 7
+  }
+}
+
+// --- visible-window derivation cache --------------------------------------
+// Module scope on purpose: the focused regression/benchmark script
+// scripts/verify-perf-rows-cache.ts drives the SAME derivation the component
+// renders with, so the test cannot drift from the render path.
+//
+// channel.rows is NOT a stable in-place array: the shared read view
+// (src/adapter/channel/read-view.ts) rebuilds the frozen transcript container
+// on every dirty revision, so one streaming text delta hands this component a
+// brand-new array whose unchanged rows are the same frozen row objects. The
+// cache therefore keys on the WINDOW the derivation reads, never on the array
+// identity.
+
+/** Non-row inputs of the visible-window derivation. */
+export interface VisibleRowsOptions {
+  showAll: boolean
+  thinkingVisible: boolean
+  turnUsageRow: boolean
+  expanded: boolean
+  expandedRows: ReadonlySet<number>
+  jobGroupFold: JobGroupFoldMode
+}
+
+/** One cached visible-window derivation (see deriveVisibleRows). */
+export interface VisibleRowsCacheEntry {
+  /** First row of the derived window (0 while the whole list renders). */
+  windowStart: number
+  /** Row count the entry was derived from: appends and folds move the window
+   *  start, so the entry is only reusable at the same count. */
+  rowCount: number
+  thinkingVisible: boolean
+  turnRowOn: boolean
+  out: readonly ChatRow[]
+  margins: ReadonlyMap<number, boolean>
+  /** Identity tag per window row, in window order. */
+  windowRowIds: number[]
+  /** streaming === true bit per window row, in window order. */
+  windowStreamBits: Uint8Array
+  /** Job status/expand/fold hash over the window's job rows. */
+  jobsSig: number
+}
+
+/** Deterministic derivation counters. The regression script asserts on
+ *  element visits instead of wall-clock time, so the scaling claim cannot
+ *  flake on a noisy machine. Counting costs a few integer increments per
+ *  WINDOW row (never per transcript row). */
+export interface VisibleWindowProbe {
+  frames: number
+  rebuilds: number
+  /** Window slots compared by the cache fingerprint. */
+  fingerprintVisits: number
+  /** Window slots walked by the derivation loops on a rebuild. */
+  derivationVisits: number
+  /** Row count of the window the last call compared or derived. */
+  windowLength: number
+}
+const visibleWindowProbe: VisibleWindowProbe = {
+  frames: 0, rebuilds: 0, fingerprintVisits: 0, derivationVisits: 0, windowLength: 0,
+}
+export function readVisibleWindowProbe(): VisibleWindowProbe {
+  return { ...visibleWindowProbe }
+}
+export function resetVisibleWindowProbe(): void {
+  visibleWindowProbe.frames = 0
+  visibleWindowProbe.rebuilds = 0
+  visibleWindowProbe.fingerprintVisits = 0
+  visibleWindowProbe.derivationVisits = 0
+  visibleWindowProbe.windowLength = 0
+}
+
+/** Identity tag per projected row object. The read view freezes every row it
+ *  hands out and structurally shares the rows a revision did not touch, so for
+ *  these rows "same object" is exactly "same content": a whole window compares
+ *  by number without hashing row fields. A changed row is a fresh frozen copy
+ *  and therefore a fresh tag; the WeakMap lets the old copy be collected. */
+const rowIdentityTags = new WeakMap<ChatRow, number>()
+let nextRowIdentityTag = 1
+function rowIdentityTag(row: ChatRow): number {
+  const known = rowIdentityTags.get(row)
+  if (known !== undefined) return known
+  const tag = nextRowIdentityTag++
+  rowIdentityTags.set(row, tag)
+  return tag
+}
+
+/**
+ * Derive the visible rows (fold cap, then filters, job grouping and block
+ * margins), reusing previous when nothing the pipeline reads has changed.
+ *
+ * The fold cap keeps only the LAST RENDERED_ROW_CAP rows: windowStart is
+ * rows.length - RENDERED_ROW_CAP, or 0 while showAll / a short transcript
+ * renders everything. Every downstream step reads exactly that tail and never
+ * a row before it, so the cache fingerprint is:
+ *
+ *  1. windowStart + rows.length: appends and folds move the window edge;
+ *  2. the window rows: identity tags (row object swapped), streaming bits
+ *     (empty-assistant filter boundary) and the job status/expand/fold hash
+ *     (group decoration and folded members);
+ *  3. the flags: thinkingVisible and turnUsageRow directly, expanded and
+ *     jobGroupFold through the job-hash base term, expandedRows through the
+ *     per-job-row membership term.
+ *
+ * A revision that only touches rows OUTSIDE the window therefore keeps the
+ * previous result object (derived arrays, margins and the visGen-keyed memo
+ * below stay stable), while a streaming delta on a window row re-derives in
+ * O(window) <= RENDERED_ROW_CAP rows regardless of the transcript length.
+ * showAll renders the whole list by request, so that mode stays O(rows).
+ */
+export function deriveVisibleRows(
+  rows: readonly ChatRow[],
+  options: VisibleRowsOptions,
+  previous: VisibleRowsCacheEntry | null,
+): VisibleRowsCacheEntry {
+  const hiddenCount = rows.length - RENDERED_ROW_CAP
+  const windowStart = options.showAll || hiddenCount <= 0 ? 0 : hiddenCount
+  const windowLength = rows.length - windowStart
+  visibleWindowProbe.frames += 1
+  visibleWindowProbe.windowLength = windowLength
+  let reusable = previous !== null &&
+    previous.rowCount === rows.length &&
+    previous.windowStart === windowStart &&
+    previous.thinkingVisible === options.thinkingVisible &&
+    previous.turnRowOn === options.turnUsageRow
+  let jobsSig = (options.expanded ? 1 : 0) * 7 +
+    (options.jobGroupFold === 'always' ? 1 : options.jobGroupFold === 'never' ? 2 : 3)
+  const priorIds = reusable ? previous!.windowRowIds : undefined
+  const priorBits = reusable ? previous!.windowStreamBits : undefined
+  for (let i = windowStart; i < rows.length; i++) {
+    visibleWindowProbe.fingerprintVisits += 1
+    const row = rows[i]!
+    if (
+      reusable &&
+      (priorIds![i - windowStart] !== rowIdentityTag(row) ||
+        priorBits![i - windowStart] !== (row.streaming === true ? 1 : 0))
+    ) reusable = false
+    // Job-group fingerprint: job cards settle by replacing row.job and the
+    // expand/fold switches live in Sets, so neither changes a row's text or
+    // kind, yet both decide whether a consecutive-job run folds - and a
+    // folded run REMOVES its members from the visible window. Only window job
+    // rows can affect this window's derivation.
+    if (row.kind === 'job' && row.job !== undefined) {
+      jobsSig = (jobsSig * 33 + row.id + jobStatusCode(row.job.status) + (options.expandedRows.has(row.id) ? 7 : 0)) | 0
+    }
+  }
+  if (reusable && previous!.jobsSig !== jobsSig) reusable = false
+  if (reusable) return previous!
+  visibleWindowProbe.rebuilds += 1
+  const sliced = windowStart === 0 ? rows : rows.slice(windowStart)
+  // Empty settled assistant rows (PR #383's duplicate-dot bug): when the
+  // model calls a tool without producing text, the assistant/message event
+  // carries empty text — rendered as a lone `●` bullet dangling above the
+  // tool card. Filter them BEFORE virtualization (not by rendering null in
+  // TranscriptRow): a null row never mounts, never enters paintedOnce, and
+  // would stall the main-screen history-paint batch loop forever. A row
+  // that is STILL STREAMING keeps its place even with empty text — the
+  // live dot is the "model is answering" affordance and content may yet
+  // arrive.
+  // Filtering, measurement and rendering share the same display text.
+  // A settled narration-only reply has real content; only truly empty
+  // text-only rows disappear. Image-only rows retain their own content.
+  const rendersEmptyAssistant = (row: ChatRow): boolean =>
+    row.kind === 'assistant' &&
+    row.streaming !== true &&
+    assistantDisplayText(row).trim() === '' &&
+    (row.images?.length ?? 0) === 0
+  let hasEmptyAssistant = false
+  for (const row of sliced) {
+    visibleWindowProbe.derivationVisits += 1
+    if (rendersEmptyAssistant(row)) {
+      hasEmptyAssistant = true
+      break
+    }
+  }
+  // The transcript can arrive FROZEN end to end: the session projection
+  // freezes both the row array and every row object (session-projection.ts
+  // `Object.freeze(rows.map(row => Object.freeze({ ...row })))`), so the
+  // pass-through branch below must COPY rather than alias it. The group
+  // decoration further down is render-local derived state: it rides
+  // shallow copies inside this writable array, never the shared row
+  // objects (an in-place write throws on a frozen row and takes the TUI
+  // down at startup — the resume/replay first frame delivers exactly
+  // that shape).
+  let out: ChatRow[] = hasEmptyAssistant
+    ? sliced.filter(row =>
+        !rendersEmptyAssistant(row) &&
+        (options.thinkingVisible || row.kind !== 'reasoning'),
+      )
+    : options.thinkingVisible
+      ? sliced.slice()
+      : sliced.filter(row => row.kind !== 'reasoning')
+  // Turn-usage rows (settings `dsh-tui.turnUsageRow`, default off): a
+  // pure PRESENTATION gate — filtering here (not render-null) keeps the
+  // row out of the window entirely, so no cached height or mounted node
+  // survives the toggle. The ledger data itself is collected regardless.
+  if (!options.turnUsageRow) out = out.filter(row => row.kind !== 'turn-summary')
+  // --- consecutive-job groups ------------------------------------------
+  // A batch of run_in_background calls lands as N adjacent job cards (the
+  // projection pushes the whole roster in one sync) and EVERY card pays
+  // the 1-row block margin — a pile of near-identical rows for work nobody
+  // reads card by card. Read ≥2 adjacent job rows as ONE group instead:
+  // members drop the blank line between them, hang off a shared chain
+  // rail, and the head row carries the run summary. A fully settled run
+  // (≥ JOB_GROUP_FOLD_MIN) folds into that summary alone.
+  //
+  // Folded members are removed HERE, before virtualization, so window
+  // indices line up (same rule as the thinking filter). The fold is the
+  // ordinary per-row expand gesture: clicking the summary — or Ctrl+O —
+  // reopens the run, clicking again folds it back.
+  //
+  // Runs are detected in the VISIBLE list, so a run whose head fell behind
+  // the RENDERED_ROW_CAP fold window is read from the first visible member
+  // (the header then counts what is on screen — never a headerless rail).
+  const foldedMembers = new Set<number>()
+  for (let i = 0; i < out.length; i++) {
+    visibleWindowProbe.derivationVisits += 1
+    const head = out[i]!
+    if (head.kind !== 'job' || head.job === undefined) continue
+    let end = i
+    while (end + 1 < out.length) {
+      const next = out[end + 1]!
+      if (next.kind !== 'job' || next.job === undefined) break
+      end++
+    }
+    const count = end - i + 1
+    if (count < 2) {
+      // A lone card renders exactly as it did before groups existed (no
+      // rail, its own block margin). Nothing to clear: the decoration
+      // lives on per-pass shallow copies, never on the shared rows.
+      i = end
+      continue
+    }
+    let running = 0
+    let completed = 0
+    let failed = 0
+    let killed = 0
+    let startedAt = Number.POSITIVE_INFINITY
+    let endedAt: number | undefined
+    for (let k = i; k <= end; k++) {
+      const job = out[k]!.job!
+      switch (job.status) {
+        case 'running':
+        case 'stopping':
+          running++
+          break
+        case 'completed':
+          completed++
+          break
+        case 'killed':
+          killed++
+          break
+        default:
+          failed++
+      }
+      startedAt = Math.min(startedAt, job.startedAt)
+      if (job.finishedAt !== undefined) endedAt = Math.max(endedAt ?? job.finishedAt, job.finishedAt)
+    }
+    // A live member means the run is not over: no duration to freeze.
+    if (running > 0) endedAt = undefined
+    // Fold policy (settings `dsh-tui.jobGroupFold`): `auto` waits for the
+    // whole run to settle, `always` folds a run of 2+ immediately (live
+    // members included — the header still reports what is running), and
+    // `never` leaves the decision to a header click. Ctrl+O force-expands
+    // every run; the header click lands in expandedRows.
+    const foldMin = options.jobGroupFold === 'always' ? 2 : JOB_GROUP_FOLD_MIN
+    const folded = options.jobGroupFold !== 'never' && count >= foldMin &&
+      (options.jobGroupFold === 'always' || running === 0) && !options.expanded && !options.expandedRows.has(head.id)
+    for (let k = i; k <= end; k++) {
+      // Copy-on-write: decorate a shallow copy. `out[k].jobGroup = …` in
+      // place throws on the frozen rows the session projection delivers
+      // (resume/replay), crashing the TUI at startup.
+      out[k] = {
+        ...(out[k]!),
+        jobGroup: {
+          head: k === i,
+          last: k === end,
+          count,
+          folded,
+          running,
+          completed,
+          failed,
+          killed,
+          startedAt,
+          ...(endedAt === undefined ? {} : { endedAt }),
+        },
+      }
+    }
+    if (folded) {
+      for (let k = i + 1; k <= end; k++) foldedMembers.add(out[k]!.id)
+    }
+    i = end
+  }
+  const visibleOut = foldedMembers.size === 0 ? out : out.filter(row => !foldedMembers.has(row.id))
+  // Every rendered block gets a 1-row top margin except the first. The pass
+  // runs over the same visible window the filters and grouping produced (the
+  // fold cap already dropped older rows), so a windowed row keeps the spacing
+  // it would have in a fully-mounted list. Group members are the exception:
+  // they sit flush under their head, which is the separator line the group
+  // removes.
+  const margins = new Map<number, boolean>()
+  {
+    let prev: ChatRow['kind'] | undefined
+    for (const row of visibleOut) {
+      visibleWindowProbe.derivationVisits += 1
+      const member = row.jobGroup !== undefined && !row.jobGroup.head
+      margins.set(row.id, prev !== undefined && !member)
+      prev = row.kind
+    }
+  }
+  const windowRowIds = new Array<number>(windowLength)
+  const windowStreamBits = new Uint8Array(windowLength)
+  for (let i = windowStart; i < rows.length; i++) {
+    visibleWindowProbe.derivationVisits += 1
+    const row = rows[i]!
+    windowRowIds[i - windowStart] = rowIdentityTag(row)
+    windowStreamBits[i - windowStart] = row.streaming === true ? 1 : 0
+  }
+  return {
+    windowStart,
+    rowCount: rows.length,
+    thinkingVisible: options.thinkingVisible,
+    turnRowOn: options.turnUsageRow,
+    out: visibleOut,
+    margins,
+    windowRowIds,
+    windowStreamBits,
+    jobsSig,
   }
 }
 
@@ -537,244 +865,35 @@ export function MessageList({
   const hiddenCount = rows.length - RENDERED_ROW_CAP
   // The thinking filter runs BEFORE virtualization so window indices line up.
   //
-  // Fingerprint memo: every scroll tick re-rendered this pipeline even when
-  // nothing changed — slice + filter allocate a fresh rows-length array and
-  // the margins pre-pass allocates a Map with one entry per row (3200-row
-  // session ⇒ ~200KB churn per 16ms tick, the GC share of the scroll
-  // profile). The inputs are all identity-stable across ticks: channel.rows
-  // is a live in-place array (identity changes only on rewind/new session),
-  // showAll/thinkingVisible are React state. Rows APPENDED in place keep the
-  // identity — the cache must key on rows.length too (streaming appends).
-  const visibleRowsCacheRef = React.useRef<{
-    rows: readonly ChatRow[]
-    rowsLength: number
-    showAll: boolean
-    thinkingVisible: boolean
-    out: readonly ChatRow[]
-    margins: ReadonlyMap<number, boolean>
-    /** Per-row `streaming === true` bits. The settle flip (streaming cleared
-     * in place, rows identity/length unchanged) changes empty-assistant
-     * filtering below, so the cache must rebuild on any bit change. */
-    streamBits: Uint8Array
-    /** Job-status/toggle fingerprint (see below): job cards settle IN PLACE,
-     *  and a settling run changes how — and whether — its members render. */
-    jobsSig: number
-    /** Turn-usage row toggle: flipping it adds/removes turn-summary rows
-     *  from the visible window without touching the row array. */
-    turnRowOn: boolean
-  } | null>(null)
+  // Visible-window derivation cache. The fold cap slices the transcript to its
+  // last RENDERED_ROW_CAP rows and every downstream step (empty-assistant
+  // filter, thinking filter, turn-usage filter, consecutive-job grouping,
+  // block margins) reads only that slice, so deriveVisibleRows fingerprints
+  // and re-derives the window instead of the whole list. It cannot key on the
+  // rows ARRAY identity: the shared read view rebuilds the frozen transcript
+  // container on every dirty revision, so one streaming delta hands this
+  // component a new array. It keys on the window contents (row identity tags,
+  // streaming bits, the job status/expand/fold hash) plus the presentation
+  // flags, which makes the per-frame cost O(window) <= 120 rows regardless of
+  // session length; a revision that only touches rows OUTSIDE the window
+  // keeps this cache (and the visGen-keyed geometry memos below) intact.
+  const visibleRowsCacheRef = React.useRef<VisibleRowsCacheEntry | null>(null)
   /** Generation counter for the visibleRows cache (timeline memo key). */
   const visGenRef = React.useRef(0)
-  const visibleCache = visibleRowsCacheRef.current
-  // Streaming-bit fingerprint: in-place `streaming = false` writes (turn
-  // settle) are invisible to the rows-identity/length key above, but an
-  // assistant row that settles with EMPTY text crosses the empty-assistant
-  // filter boundary (visible-while-streaming → filtered-when-settled).
-  // Allocation-free scan; rebuild only when a bit actually flipped.
-  let streamBitsSame = visibleCache !== null && visibleCache.streamBits.length === rows.length
-  if (streamBitsSame) {
-    const bits = visibleCache!.streamBits
-    for (let i = 0; i < rows.length; i++) {
-      if (bits[i] !== (rows[i]!.streaming === true ? 1 : 0)) { streamBitsSame = false; break }
-    }
-  }
-  // Job-group fingerprint: job statuses land IN PLACE (`row.job` is
-  // re-assigned by the projection, the row array never moves) and the expand
-  // toggles live in a Set — none of that shows up in the rows identity or
-  // length key above, yet both decide whether a consecutive-job run folds,
-  // and a folded run REMOVES its members from the visible window. One
-  // allocation-free pass over the row list (only job rows feed the hash).
-  let jobsSig = (expanded ? 1 : 0) * 7 + (jobGroupFold === 'always' ? 1 : jobGroupFold === 'never' ? 2 : 3)
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i]!
-    if (row.kind !== 'job' || row.job === undefined) continue
-    jobsSig = (jobsSig * 33 + row.id + jobStatusCode(row.job.status) + (expandedRows.has(row.id) ? 7 : 0)) | 0
-  }
-  if (
-    visibleCache === null ||
-    visibleCache.rows !== rows ||
-    visibleCache.rowsLength !== rows.length ||
-    visibleCache.showAll !== (showAll || hiddenCount <= 0) ||
-    visibleCache.thinkingVisible !== thinkingVisible ||
-    visibleCache.jobsSig !== jobsSig ||
-    visibleCache.turnRowOn !== turnUsageRow ||
-    !streamBitsSame
-  ) {
-    const sliced = showAll || hiddenCount <= 0
-      ? rows
-      : rows.slice(hiddenCount)
-    // Empty settled assistant rows (PR #383's duplicate-dot bug): when the
-    // model calls a tool without producing text, the assistant/message event
-    // carries empty text — rendered as a lone `●` bullet dangling above the
-    // tool card. Filter them BEFORE virtualization (not by rendering null in
-    // TranscriptRow): a null row never mounts, never enters paintedOnce, and
-    // would stall the main-screen history-paint batch loop forever. A row
-    // that is STILL STREAMING keeps its place even with empty text — the
-    // live dot is the "model is answering" affordance and content may yet
-    // arrive.
-    // Filtering, measurement and rendering share the same display text.
-    // A settled narration-only reply has real content; only truly empty
-    // text-only rows disappear. Image-only rows retain their own content.
-    const rendersEmptyAssistant = (row: ChatRow): boolean =>
-      row.kind === 'assistant' &&
-      row.streaming !== true &&
-      assistantDisplayText(row).trim() === '' &&
-      (row.images?.length ?? 0) === 0
-    let hasEmptyAssistant = false
-    for (const row of sliced) {
-      if (rendersEmptyAssistant(row)) {
-        hasEmptyAssistant = true
-        break
-      }
-    }
-    // The transcript can arrive FROZEN end to end: the session projection
-    // freezes both the row array and every row object (session-projection.ts
-    // `Object.freeze(rows.map(row => Object.freeze({ ...row })))`), so the
-    // pass-through branch below must COPY rather than alias it. The group
-    // decoration further down is render-local derived state: it rides
-    // shallow copies inside this writable array, never the shared row
-    // objects (an in-place write throws on a frozen row and takes the TUI
-    // down at startup — the resume/replay first frame delivers exactly
-    // that shape).
-    let out: ChatRow[] = hasEmptyAssistant
-      ? sliced.filter(row =>
-          !rendersEmptyAssistant(row) &&
-          (thinkingVisible || row.kind !== 'reasoning'),
-        )
-      : thinkingVisible
-        ? sliced.slice()
-        : sliced.filter(row => row.kind !== 'reasoning')
-    // Turn-usage rows (settings `dsh-tui.turnUsageRow`, default off): a
-    // pure PRESENTATION gate — filtering here (not render-null) keeps the
-    // row out of the window entirely, so no cached height or mounted node
-    // survives the toggle. The ledger data itself is collected regardless.
-    if (!turnUsageRow) out = out.filter(row => row.kind !== 'turn-summary')
-    // --- consecutive-job groups ------------------------------------------
-    // A batch of run_in_background calls lands as N adjacent job cards (the
-    // projection pushes the whole roster in one sync) and EVERY card pays
-    // the 1-row block margin — a pile of near-identical rows for work nobody
-    // reads card by card. Read ≥2 adjacent job rows as ONE group instead:
-    // members drop the blank line between them, hang off a shared chain
-    // rail, and the head row carries the run summary. A fully settled run
-    // (≥ JOB_GROUP_FOLD_MIN) folds into that summary alone.
-    //
-    // Folded members are removed HERE, before virtualization, so window
-    // indices line up (same rule as the thinking filter). The fold is the
-    // ordinary per-row expand gesture: clicking the summary — or Ctrl+O —
-    // reopens the run, clicking again folds it back.
-    //
-    // Runs are detected in the VISIBLE list, so a run whose head fell behind
-    // the RENDERED_ROW_CAP fold window is read from the first visible member
-    // (the header then counts what is on screen — never a headerless rail).
-    const foldedMembers = new Set<number>()
-    for (let i = 0; i < out.length; i++) {
-      const head = out[i]!
-      if (head.kind !== 'job' || head.job === undefined) continue
-      let end = i
-      while (end + 1 < out.length) {
-        const next = out[end + 1]!
-        if (next.kind !== 'job' || next.job === undefined) break
-        end++
-      }
-      const count = end - i + 1
-      if (count < 2) {
-        // A lone card renders exactly as it did before groups existed (no
-        // rail, its own block margin). Nothing to clear: the decoration
-        // lives on per-pass shallow copies, never on the shared rows.
-        i = end
-        continue
-      }
-      let running = 0
-      let completed = 0
-      let failed = 0
-      let killed = 0
-      let startedAt = Number.POSITIVE_INFINITY
-      let endedAt: number | undefined
-      for (let k = i; k <= end; k++) {
-        const job = out[k]!.job!
-        switch (job.status) {
-          case 'running':
-          case 'stopping':
-            running++
-            break
-          case 'completed':
-            completed++
-            break
-          case 'killed':
-            killed++
-            break
-          default:
-            failed++
-        }
-        startedAt = Math.min(startedAt, job.startedAt)
-        if (job.finishedAt !== undefined) endedAt = Math.max(endedAt ?? job.finishedAt, job.finishedAt)
-      }
-      // A live member means the run is not over: no duration to freeze.
-      if (running > 0) endedAt = undefined
-      // Fold policy (settings `dsh-tui.jobGroupFold`): `auto` waits for the
-      // whole run to settle, `always` folds a run of 2+ immediately (live
-      // members included — the header still reports what is running), and
-      // `never` leaves the decision to a header click. Ctrl+O force-expands
-      // every run; the header click lands in expandedRows.
-      const foldMin = jobGroupFold === 'always' ? 2 : JOB_GROUP_FOLD_MIN
-      const folded = jobGroupFold !== 'never' && count >= foldMin &&
-        (jobGroupFold === 'always' || running === 0) && !expanded && !expandedRows.has(head.id)
-      for (let k = i; k <= end; k++) {
-        // Copy-on-write: decorate a shallow copy. `out[k].jobGroup = …` in
-        // place throws on the frozen rows the session projection delivers
-        // (resume/replay), crashing the TUI at startup.
-        out[k] = {
-          ...(out[k]!),
-          jobGroup: {
-            head: k === i,
-            last: k === end,
-            count,
-            folded,
-            running,
-            completed,
-            failed,
-            killed,
-            startedAt,
-            ...(endedAt === undefined ? {} : { endedAt }),
-          },
-        }
-      }
-      if (folded) {
-        for (let k = i + 1; k <= end; k++) foldedMembers.add(out[k]!.id)
-      }
-      i = end
-    }
-    const visibleOut = foldedMembers.size === 0 ? out : out.filter(row => !foldedMembers.has(row.id))
-    // Every rendered block gets a 1-row top margin except the first. Pre-pass
-    // over the FULL list so a windowed row keeps the exact spacing it would
-    // have in a fully-mounted list. Group members are the exception: they sit
-    // flush under their head, which is the separator line the group removes.
-    const margins = new Map<number, boolean>()
-    {
-      let prev: ChatRow['kind'] | undefined
-      for (const row of visibleOut) {
-        const member = row.jobGroup !== undefined && !row.jobGroup.head
-        margins.set(row.id, prev !== undefined && !member)
-        prev = row.kind
-      }
-    }
-    const streamBits = new Uint8Array(rows.length)
-    for (let i = 0; i < rows.length; i++) streamBits[i] = rows[i]!.streaming === true ? 1 : 0
-    visibleRowsCacheRef.current = {
-      rows,
-      rowsLength: rows.length,
-      showAll: showAll || hiddenCount <= 0,
-      thinkingVisible,
-      out: visibleOut,
-      margins,
-      streamBits,
-      jobsSig,
-      turnRowOn: turnUsageRow,
-    }
+  const derivedRows = deriveVisibleRows(rows, {
+    showAll,
+    thinkingVisible,
+    turnUsageRow,
+    expanded,
+    expandedRows,
+    jobGroupFold,
+  }, visibleRowsCacheRef.current)
+  if (derivedRows !== visibleRowsCacheRef.current) {
+    visibleRowsCacheRef.current = derivedRows
     visGenRef.current++
   }
-  const visibleRows = visibleRowsCacheRef.current!.out
-  const margins = visibleRowsCacheRef.current!.margins
+  const visibleRows = derivedRows.out
+  const margins = derivedRows.margins
   // Selection keeps its highlight; expanding a row adds no band of its own.
   // A tool card supplies the configured tool-card surface (and its diff line
   // tints) from the inside; the band itself stays limited to selection.

@@ -4515,12 +4515,12 @@ export function Chat({
   }
 
   // === Message-selection mode (Shift+↑ message actions) ===
-  // NOTE: rows is a live in-place array on the channel (no new reference per
-  // update), so derived lists must be computed per render — a useMemo keyed
-  // on `channel.rows` would freeze at the first empty snapshot forever.
-  // Both lists only feed their respective modes; computing them
-  // unconditionally cost an O(rows) scan + array allocation per render
-  // (every streamed chunk), so they are gated on the consuming mode.
+  // NOTE: `channel.rows` is a detached read-view snapshot: the container is
+  // rebuilt (new frozen array, shared row objects) on every dirty revision,
+  // so a useMemo keyed on it misses on every streamed chunk anyway. Both
+  // lists only feed their respective modes; computing them unconditionally
+  // cost an O(rows) scan + array allocation per render, so they are gated on
+  // the consuming mode.
   const selectableRows = selectionActive
     ? channel.rows.filter(row => SELECTABLE_KINDS.has(row.kind))
     : NO_ROWS
@@ -4536,8 +4536,8 @@ export function Chat({
 
   // Double-Esc rewind: the user's own messages, newest first (the list shows
   // selectable user turns; steering side-questions are excluded). Computed
-  // per render while the picker is open — `channel.rows` is a live in-place
-  // array (see selectableRows).
+  // per render while the picker is open — `channel.rows` is a detached
+  // snapshot (see selectableRows).
   const rewindRows = overlay.kind === 'rewind'
     ? channel.rows
       .filter(row => row.kind === 'user' && row.label === undefined)
@@ -4784,8 +4784,8 @@ export function Chat({
   })
 
   // `/` transcript search: rows whose searchable text contains the query.
-  // Computed per render — `channel.rows` is a live in-place array (see
-  // selectableRows); a useMemo would freeze the match list at mount.
+  // Computed per render — `channel.rows` is a detached snapshot (see
+  // selectableRows); a useMemo would miss on every streamed chunk anyway.
   const searchMatches = (() => {
     const q = searchQuery.toLowerCase()
     if (!q) return []
@@ -7085,7 +7085,8 @@ export function Chat({
   // MessageList) — scrolled up to an old turn, it carries THAT turn's
   // prompt, not the latest one. The row stays while scrolled up and goes
   // blank when nothing is pinned, so the viewport never shifts under it.
-  // channel.rows is a live in-place array, so the lookup is per-render.
+  // channel.rows is a detached snapshot that changes every revision, so the
+  // lookup is per-render.
   const anchorUserRowId = timeline.pinnedId
   const anchorUserText =
     anchorUserRowId === null
