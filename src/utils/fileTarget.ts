@@ -145,9 +145,15 @@ export function pathExistsOnDisk(path: string): boolean {
  * run to the end of the word; everything else must contain a slash AND a
  * dot-extension tail. This is only a pre-filter — every span is then
  * verified by `looksLikeFilePath` before it becomes clickable.
+ *
+ * Both character classes are bounded to the same 200-character budget
+ * `looksLikeFilePath` enforces. Unbounded `*` made every position of a long
+ * unbroken token (base64, minified JS) rescan to the end, so one 100k-char
+ * token cost seconds per render — and the linkifier runs on every frame of
+ * a streaming btw answer.
  */
 const PATH_SPAN_RE =
-  /(?:\.{1,2}[\\/]|[\\/]|~[\\/]|[A-Za-z]:[\\/])[^\s<>"'`|?#]*|(?:[^\s<>"'`|?#]*[\\/][^\s<>"'`|?#]*\.[A-Za-z0-9]{1,6})/gu
+  /(?:\.{1,2}[\\/]|[\\/]|~[\\/]|[A-Za-z]:[\\/])[^\s<>"'`|?#]{0,200}|(?:[^\s<>"'`|?#]{0,200}[\\/][^\s<>"'`|?#]{0,200}\.[A-Za-z0-9]{1,6})/gu
 
 /**
  * Replace every path-looking span in `text` via `wrap(path, display)`.
@@ -161,6 +167,16 @@ export function linkifyFilePaths(
   text: string,
   wrap: (path: string, display: string) => string,
 ): string {
+  // Both alternatives require a separator, so separator-free text (base64,
+  // minified JS, a long URL-less token) can never match. Skipping the scan
+  // keeps those tokens linear instead of quadratic.
+  if (!text.includes('/') && !text.includes('\\')) return text
+  // A single candidate token longer than the 200-character budget can never
+  // pass `looksLikeFilePath` (it rejects `t.length > 200`), so scanning it is
+  // wasted work. This also keeps the S4 shape — one separator followed by a
+  // huge unbroken tail — linear: the bounded quantifier below would otherwise
+  // restart its 200-character window at every position of the tail.
+  if (text.length > 200 && !/[\s<>"'`|?#]/u.test(text)) return text
   return text.replace(PATH_SPAN_RE, (match, offset, full) => {
     // A candidate must start at a text boundary, not inside another token:
     // `/idle/needs-input` in `working/idle/needs-input` otherwise looks like
