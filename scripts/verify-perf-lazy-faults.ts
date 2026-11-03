@@ -464,7 +464,7 @@ async function runParent(): Promise<number> {
 
   // 汇总（不替代逐场景断言；跨场景对比只作记录）。
   echo('━━━ 汇总')
-  echo(`首帧前加载模块数：${Object.entries(loadCounts).map(([name, count]) => `${name}=${count}`).join('，')}`)
+  echo(`总加载模块数：${Object.entries(loadCounts).map(([name, count]) => `${name}=${count}`).join('，')}`)
   echo(`断言失败数：${failed}（详见上方 FAIL 行）`)
   if (failed > 0) echo('结果：FAIL')
   else echo('结果：PASS（四场景全部通过）')
