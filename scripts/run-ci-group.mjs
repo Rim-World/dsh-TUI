@@ -1576,6 +1576,14 @@ const GROUPS = {
     ['verify-perf-read-view', ['node', '--import', 'tsx/esm', 'scripts/verify-perf-read-view.ts']],
     ['verify-perf-rows-cache', ['node', '--import', 'tsx/esm', 'scripts/verify-perf-rows-cache.ts']],
   ],
+  // 等价性回归（004-M）：差分测试 + 屏幕黄金 + WP6 故障注入。
+  // 本地用法：node scripts/run-ci-group.mjs perf-equiv --jobs 1
+  'perf-equiv': [
+    ['verify-perf-filelink-differential', ['node', '--import', 'tsx/esm', 'scripts/verify-perf-filelink-differential.ts', '--probe-extended']],
+    ['verify-perf-equiv-fuzz', ['node', '--import', 'tsx/esm', 'scripts/verify-perf-equiv-fuzz.ts'], { DSH_TUI_EQUIV_QUICK: '1' }],
+    ['verify-screen-golden', ['node', '--import', 'tsx/esm', 'scripts/verify-screen-golden.ts']],
+    ['verify-perf-lazy-faults', ['node', '--import', 'tsx/esm', 'scripts/verify-perf-lazy-faults.ts']],
+  ],
 }
 
 const groupName = process.argv[2]
